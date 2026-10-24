@@ -1,221 +1,313 @@
-----------------------------------------------------------------------------------
--- Company: Red~Bote
--- Engineer: Glenn Neidermeier
--- 
--- Create Date: 11/28/2024 06:47:20 PM
--- Design Name: 
--- Module Name: sky_skipper_basys3 
--- Project Name: Sky skipper by Dar
--- Target Devices: Basys 3 Artix-7 FPGA Trainer Board
--- Tool Versions: 
--- Description: 
---   Sky skipper by Dar port to Basys 3 Artix-7 FPGA Trainer Board
--- Dependencies: 
---   vhdl_sky_skipper_rev_01_2020_01_28.zip
--- Revision:
--- Revision 0.01 - File Created
--- Additional Comments:
--- 
-----------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+-- Basys 3 top level for Sky Skipper by Red~Bote, derived from
+-- sky_skipper_de10_lite.vhd by Dar (darfpga@aol.fr, http://darfpga.blogspot.fr);
+-- see that file for its history.
+---------------------------------------------------------------------------------
+--
+-- release rev 01 : initial Basys 3 release
+--  (23/10/2026)
+--
+---------------------------------------------------------------------------------
+-- Educational use only
+-- Do not redistribute synthetized file with roms
+-- Do not redistribute roms whatever the form
+-- Use at your own risk
+---------------------------------------------------------------------------------
+--
+-- Main features :
+--  PS2 keyboard input @onboard USB HID (PS/2 emulation)
+--  Joystick input     @JXADC pins 1/2/3/4/7 = right/left/down/up/bomb (active low);
+--                     any JXADC direction also asserts speed up
+--  Audio pwm output   @PmodAMP2 on JA pins 1/2/4; sw15 = audio disable, sw14 = gain
+--
+--  Video         : VGA 31kHz/60Hz progressive and TV 15kHz interlaced
+--  Cocktail mode : NO
+--  Sound         : OK
+--
+-- Uses 1 MMCM (clk_wiz_0) for 40.32MHz from 100MHz
+--
+-- Board buttons :
+--   btnC : reset game
+--   btnU : Add coin1
+--   btnD : Add coin2
+--   btnL : Start 1 player
+--   btnR : Start 2 players
+--
+-- Board switches :
+--   sw7-0 : dip switch 2 (switch value passed to the core unchanged; see port map)
+--   sw11-8: dip switch 1 coinage DCBA (bits 3-0), down = default, up inverts the bit
+--   sw13 : 0 = 31kHz VGA, 1 = 15kHz TV (csync on hs)
+--
+-- Keyboard players inputs (MAME defaults) :
+--
+--   5 : Add coin1
+--   6 : Add coin2
+--   1 : Start 1 player
+--   2 : Start 2 players
+--   9 : Service
+--   LEFT CTRL   : fire1 (speed up plane)
+--   LEFT ALT    : fire2 (bomb)
+--   RIGHT arrow : move right
+--   LEFT  arrow : move left
+--   UP    arrow : move up
+--   DOWN  arrow : move down
+--
+-- Other details : see sky skipper.vhd
+---------------------------------------------------------------------------------
 
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.std_logic_unsigned.all;
 use ieee.numeric_std.all;
+
+library work;
+
 entity sky_skipper_basys3 is
-    port (
-        clk : in std_logic;
+port(
+  clk            : in std_logic;
+  btnC           : in std_logic;
+  btnU           : in std_logic;
+  btnD           : in std_logic;
+  btnL           : in std_logic;
+  btnR           : in std_logic;
+  sw             : in std_logic_vector(15 downto 0);
 
-        O_PMODAMP2_AIN : out std_logic;
-        O_PMODAMP2_GAIN : out std_logic;
-        O_PMODAMP2_SHUTD : out std_logic;
+  vga_r     : out std_logic_vector(3 downto 0);
+  vga_g     : out std_logic_vector(3 downto 0);
+  vga_b     : out std_logic_vector(3 downto 0);
+  vga_hs    : out std_logic;
+  vga_vs    : out std_logic;
 
-        vga_r : out std_logic_vector (3 downto 0);
-        vga_g : out std_logic_vector (3 downto 0);
-        vga_b : out std_logic_vector (3 downto 0);
-        vga_hs : out std_logic;
-        vga_vs : out std_logic;
-
-        ps2_clk : in std_logic;
-        ps2_dat : in std_logic;
-
-        sw : in std_logic_vector (15 downto 0));
+  JXADC            : in  std_logic_vector(4 downto 0);
+  ps2_clk          : in  std_logic;
+  ps2_dat          : in  std_logic;
+  O_PMODAMP2_AIN   : out std_logic;
+  O_PMODAMP2_GAIN  : out std_logic;
+  O_PMODAMP2_SHUTD : out std_logic
+);
 end sky_skipper_basys3;
 
 architecture struct of sky_skipper_basys3 is
 
-    signal pll_locked : std_logic;
-    signal clock_40 : std_logic;
-    signal clock_kbd : std_logic;
-    signal reset : std_logic;
+  signal mmcm_locked : std_logic;
+  signal clock_40  : std_logic;
+  signal reset     : std_logic;
 
-    signal clock_div : std_logic_vector(3 downto 0);
+  signal clock_div : std_logic_vector(3 downto 0);
 
-    signal r : std_logic_vector(2 downto 0);
-    signal g : std_logic_vector(2 downto 0);
-    signal b : std_logic_vector(1 downto 0);
-    signal hsync : std_logic;
-    signal vsync : std_logic;
-    signal csync : std_logic;
-    signal blankn : std_logic;
-    signal tv15Khz_mode : std_logic;
+  signal r         : std_logic_vector(2 downto 0);
+  signal g         : std_logic_vector(2 downto 0);
+  signal b         : std_logic_vector(1 downto 0);
+  signal hsync     : std_logic;
+  signal vsync     : std_logic;
+  signal csync     : std_logic;
+  signal blankn    : std_logic;
+  signal tv15Khz_mode : std_logic;
 
-    signal audio : std_logic_vector(15 downto 0);
-    signal pwm_accumulator : std_logic_vector(17 downto 0);
+  signal audio           : std_logic_vector(15 downto 0);
+  signal pwm_accumulator : std_logic_vector(17 downto 0);
 
-    signal kbd_intr : std_logic;
-    signal kbd_scancode : std_logic_vector(7 downto 0);
-    signal joy_BBBBFRLDU : std_logic_vector(8 downto 0);
-    signal fn_pulse : std_logic_vector(7 downto 0);
-    signal fn_toggle : std_logic_vector(7 downto 0);
+  -- 2-FF synchronizers for the asynchronous inputs
+  signal ps2_clk_meta, ps2_clk_s : std_logic := '1';
+  signal ps2_dat_meta, ps2_dat_s : std_logic := '1';
+  signal jxadc_meta, jxadc_s     : std_logic_vector(4 downto 0) := (others => '1');
+  signal btn_meta, btn_s         : std_logic_vector(3 downto 0) := (others => '0'); -- U, D, L, R
+  attribute ASYNC_REG : string;
+  attribute ASYNC_REG of ps2_clk_meta, ps2_clk_s, ps2_dat_meta, ps2_dat_s : signal is "TRUE";
+  attribute ASYNC_REG of jxadc_meta, jxadc_s, btn_meta, btn_s : signal is "TRUE";
 
-    signal dbg_cpu_addr : std_logic_vector(15 downto 0);
+  signal kbd_intr       : std_logic;
+  signal kbd_scancode   : std_logic_vector(7 downto 0);
+  signal kbd_rel        : std_logic := '0';
+  -- kbd_key : 0 up, 1 down, 2 left, 3 right, 4 left ctrl, 5 left alt,
+  --           6 '1', 7 '2', 8 '5', 9 '6', 10 '9'
+  signal kbd_key        : std_logic_vector(10 downto 0) := (others => '0');
+  signal joy_BBBBFRLDU  : std_logic_vector(8 downto 0);
+  signal coin1_in       : std_logic;
+  signal coin2_in       : std_logic;
+  signal start1_in      : std_logic;
+  signal start2_in      : std_logic;
+  signal sw2_in         : std_logic_vector(7 downto 0); -- dip switch 2
+  -- dip switch 1 : coinage DCBA (bits 3-0) on sw11-8, switch down = default,
+  -- up inverts the bit; n.u. bits fixed
+  constant SW1_DEFAULT  : std_logic_vector(6 downto 0) := not "1111111";
+  signal sw1_in         : std_logic_vector(6 downto 0);
 
-    component clk_wiz_0
-        port (
-            clk_out1 : out std_logic;
-            locked : out std_logic;
-            clk_in1 : in std_logic
-        );
-    end component;
+  signal vsync_r        : std_logic;
 
 begin
 
-    reset <= '0'; -- not reset_n;
+  -- btnC resets the MMCM; the core is held in reset until the MMCM locks
+  reset <= btnC or not mmcm_locked;
 
-    tv15Khz_mode <= '0'; -- not fn_toggle(7); -- F8
+  tv15Khz_mode <= sw(13);
 
-    -- Clock 40MHz for Video and CPU board
-    clocks : clk_wiz_0
-    port map(
-        -- Clock out ports  
-        clk_out1 => clock_40,
-        -- Status and control signals
-        locked => pll_locked,
-        -- Clock in ports
-        clk_in1 => clk
-    );
+  -- Clock 40MHz for Video and CPU board
+  clocks : entity work.clk_wiz_0
+  port map(
+    clk_in1  => clk,
+    clk_out1 => clock_40,
+    reset    => btnC,
+    locked   => mmcm_locked
+  );
 
-    -- Sjy skipper
-    sky_skipper : entity work.sky_skipper
-        port map(
-            clock_40 => clock_40,
-            reset => reset,
+  -- synchronize asynchronous inputs to the core clock
+  process(clock_40)
+  begin
+    if rising_edge(clock_40) then
+      ps2_clk_meta <= ps2_clk;      ps2_clk_s <= ps2_clk_meta;
+      ps2_dat_meta <= ps2_dat;      ps2_dat_s <= ps2_dat_meta;
+      jxadc_meta   <= JXADC;        jxadc_s   <= jxadc_meta;
+      btn_meta     <= btnU & btnD & btnL & btnR;
+      btn_s        <= btn_meta;
+    end if;
+  end process;
 
-            tv15Khz_mode => tv15Khz_mode,
-            video_r => r,
-            video_g => g,
-            video_b => b,
-            video_csync => csync,
-            video_blankn => blankn,
-            video_hs => hsync,
-            video_vs => vsync,
+  -- Sjy skipper
+  sky_skipper : entity work.sky_skipper
+  port map(
+    clock_40   => clock_40,
+    reset      => reset,
 
-            audio_out => audio,
+    tv15Khz_mode => tv15Khz_mode,
+    video_r      => r,
+    video_g      => g,
+    video_b      => b,
+    video_csync  => csync,
+    video_blankn => blankn,
+    video_hs     => hsync,
+    video_vs     => vsync,
 
-            coin1 => fn_pulse(0), -- F1
-            coin2 => fn_pulse(1), -- F2
-            start1 => fn_pulse(2), -- F3
-            start2 => fn_pulse(3), -- F4
+    audio_out    => audio,
 
-            right1 => joy_BBBBFRLDU(3),
-            left1 => joy_BBBBFRLDU(2),
-            up1 => joy_BBBBFRLDU(0),
-            down1 => joy_BBBBFRLDU(1),
-            fire10 => joy_BBBBFRLDU(4),
-            fire11 => joy_BBBBFRLDU(5),
+    coin1         => coin1_in,
+    coin2         => coin2_in,
+    start1        => start1_in,
+    start2        => start2_in,
 
-            right2 => joy_BBBBFRLDU(3),
-            left2 => joy_BBBBFRLDU(2),
-            up2 => joy_BBBBFRLDU(0),
-            down2 => joy_BBBBFRLDU(1),
-            fire20 => joy_BBBBFRLDU(4),
-            fire21 => joy_BBBBFRLDU(5),
+    right1         => joy_BBBBFRLDU(3),
+    left1          => joy_BBBBFRLDU(2),
+    up1            => joy_BBBBFRLDU(0),
+    down1          => joy_BBBBFRLDU(1),
+    fire10         => joy_BBBBFRLDU(4),
+    fire11         => joy_BBBBFRLDU(5),
 
-            --      ...DCBA
-            sw1 => not("1111111"), --  n.u.(3b hard wired)  / coinage(DCBA)
+    right2         => joy_BBBBFRLDU(3),
+    left2          => joy_BBBBFRLDU(2),
+    up2            => joy_BBBBFRLDU(0),
+    down2          => joy_BBBBFRLDU(1),
+    fire20         => joy_BBBBFRLDU(4),
+    fire21         => joy_BBBBFRLDU(5),
 
-            --      PONMLKJI
-            sw2 => not("11111101"), -- cocktail(P) / service2(O) / bonus(N) / difficulty(MLK) / lives(IJ)
-            -- sw2            => not(sw(7 downto 0)),
+  --      ...DCBA
+    sw1            => sw1_in,  -- sw11-8 coinage; n.u.(3b hard wired)  / coinage(DCBA)
 
-            service1 => fn_toggle(6), -- F7
+  --      PONMLKJI
+    sw2            => sw2_in,  -- sw7-0 (default not("11111101")) cocktail(P) / service2(O) / bonus(N) / difficulty(MLK) / lives(IJ)
 
-            dbg_cpu_addr => dbg_cpu_addr
-        );
+    service1       => kbd_key(10),     -- 9 (MAME service 1)
 
-    -- adapt video to 4bits/color only and blank
-    vga_r <= r & '0' when blankn = '1' else "0000";
-    vga_g <= g & '0' when blankn = '1' else "0000";
-    vga_b <= b & "00" when blankn = '1' else "0000";
+    dbg_cpu_addr => open
+  );
 
-    -- synchro composite/ synchro horizontale
-    -- vga_hs <= csync;
-    -- vga_hs <= hsync;
-    vga_hs <= csync when tv15Khz_mode = '1' else hsync;
-    -- commutation rapide / synchro verticale
-    -- vga_vs <= '1';
-    -- vga_vs <= vsync;
-    vga_vs <= '1' when tv15Khz_mode = '1' else vsync;
+  -- adapt video to 4bits/color only and blank
+  vga_r <= r & '0' when blankn = '1' else "0000";
+  vga_g <= g & '0' when blankn = '1' else "0000";
+  vga_b <= b & "00" when blankn = '1' else "0000";
 
-    -- get scancode from keyboard
-    process (reset, clock_40)
-    begin
-        if reset = '1' then
-            clock_div <= (others => '0');
-            clock_kbd <= '0';
+  -- synchro composite/ synchro horizontale
+  -- vga_hs <= csync;
+  -- vga_hs <= hsync;
+  vga_hs <= csync when tv15Khz_mode = '1' else hsync;
+  -- commutation rapide / synchro verticale
+  -- vga_vs <= '1';
+  -- vga_vs <= vsync;
+  vga_vs <= '1'   when tv15Khz_mode = '1' else vsync;
+
+  -- clock divider for the pwm sound output
+  process (reset, clock_40)
+  begin
+    if reset='1' then
+      clock_div <= (others => '0');
+    else
+      if rising_edge(clock_40) then
+        if clock_div = "1001" then
+          clock_div <= (others => '0');
         else
-            if rising_edge(clock_40) then
-                if clock_div = "1001" then
-                    clock_div <= (others => '0');
-                    clock_kbd <= not clock_kbd;
-                else
-                    clock_div <= clock_div + '1';
-                end if;
-            end if;
+          clock_div <= clock_div + '1';
         end if;
-    end process;
+      end if;
+    end if;
+  end process;
 
-    keyboard : entity work.io_ps2_keyboard
-        port map(
-            clk => clock_kbd, -- synchrounous clock with core
-            kbd_clk => ps2_clk,
-            kbd_dat => ps2_dat,
-            interrupt => kbd_intr,
-            scancode => kbd_scancode
-        );
+  -- get scancode from keyboard
+  keyboard : entity work.io_ps2_keyboard
+  port map (
+    clk       => clock_40, -- synchrounous clock with core
+    kbd_clk   => ps2_clk_s,
+    kbd_dat   => ps2_dat_s,
+    interrupt => kbd_intr,
+    scancode  => kbd_scancode
+  );
 
-    -- translate scancode to joystick
-    joystick : entity work.kbd_joystick
-        port map(
-            clk => clock_kbd, -- synchrounous clock with core
-            kbdint => kbd_intr,
-            kbdscancode => std_logic_vector(kbd_scancode),
-            joy_BBBBFRLDU => joy_BBBBFRLDU,
-            fn_pulse => fn_pulse,
-            fn_toggle => fn_toggle
-        );
-
-    -- pwm sound output
-    process (clock_40) -- use same clock as Sky skipper core
-    begin
-        if rising_edge(clock_40) then
-
-            if clock_div = "0000" then
-                pwm_accumulator <= ('0' & pwm_accumulator(16 downto 0)) + ('0' & audio & '0');
-            end if;
-
+  -- translate scancode to keys (MAME default keys, PS/2 set 2 codes)
+  -- F0 marks a release; E0 is ignored, as in kbd_joystick (keypad 8/2/4/6
+  -- also act as arrows, Right Ctrl/Alt as Left Ctrl/Alt).
+  process(clock_40)
+  begin
+    if rising_edge(clock_40) then
+      if kbd_intr = '1' then
+        if kbd_scancode = x"F0" then
+          kbd_rel <= '1';
+        elsif kbd_scancode /= x"E0" then
+          kbd_rel <= '0';
+          if kbd_scancode = x"75" then kbd_key(0)  <= not kbd_rel; end if; -- up arrow
+          if kbd_scancode = x"72" then kbd_key(1)  <= not kbd_rel; end if; -- down arrow
+          if kbd_scancode = x"6B" then kbd_key(2)  <= not kbd_rel; end if; -- left arrow
+          if kbd_scancode = x"74" then kbd_key(3)  <= not kbd_rel; end if; -- right arrow
+          if kbd_scancode = x"14" then kbd_key(4)  <= not kbd_rel; end if; -- left ctrl
+          if kbd_scancode = x"11" then kbd_key(5)  <= not kbd_rel; end if; -- left alt
+          if kbd_scancode = x"16" then kbd_key(6)  <= not kbd_rel; end if; -- 1
+          if kbd_scancode = x"1E" then kbd_key(7)  <= not kbd_rel; end if; -- 2
+          if kbd_scancode = x"2E" then kbd_key(8)  <= not kbd_rel; end if; -- 5
+          if kbd_scancode = x"36" then kbd_key(9)  <= not kbd_rel; end if; -- 6
+          if kbd_scancode = x"46" then kbd_key(10) <= not kbd_rel; end if; -- 9
         end if;
-    end process;
+      end if;
+    end if;
+  end process;
 
-    --pwm_audio_out_l <= pwm_accumulator(17);
-    --pwm_audio_out_r <= pwm_accumulator(17);
+  -- merge keyboard, buttons and JXADC joystick (active low); player 2 mirrors
+  -- player 1 as on the DE10-lite top
+  coin1_in  <= kbd_key(8) or btn_s(3); -- 5 or btnU
+  coin2_in  <= kbd_key(9) or btn_s(2); -- 6 or btnD
+  start1_in <= kbd_key(6) or btn_s(1); -- 1 or btnL
+  start2_in <= kbd_key(7) or btn_s(0); -- 2 or btnR
+  sw2_in    <= sw(7 downto 0);         -- dip switch 2 from sw7-0 (not inverted)
+  sw1_in    <= SW1_DEFAULT xor ("000" & sw(11 downto 8)); -- coinage from sw11-8
+  joy_BBBBFRLDU(0) <= kbd_key(0) or not jxadc_s(3); -- up    (JXADC4)
+  joy_BBBBFRLDU(1) <= kbd_key(1) or not jxadc_s(2); -- down  (JXADC3)
+  joy_BBBBFRLDU(2) <= kbd_key(2) or not jxadc_s(1); -- left  (JXADC2)
+  joy_BBBBFRLDU(3) <= kbd_key(3) or not jxadc_s(0); -- right (JXADC1)
+  -- fire1 (speed up) : left ctrl, or any JXADC direction
+  joy_BBBBFRLDU(4) <= kbd_key(4) or not (jxadc_s(3) and jxadc_s(2) and jxadc_s(1) and jxadc_s(0));
+  joy_BBBBFRLDU(5) <= kbd_key(5) or not jxadc_s(4); -- fire2 (bomb) : left alt (JXADC7)
+  joy_BBBBFRLDU(8 downto 6) <= "000";
 
-    -- active-low shutdown pin
-    O_PMODAMP2_SHUTD <= sw(14);
-    -- gain pin is driven high there is a 6 dB gain, low is a 12 dB gain 
-    O_PMODAMP2_GAIN <= sw(15);
+  -- pwm sound output
+  process(clock_40)  -- use same clock as Sky skipper core
+  begin
+    if rising_edge(clock_40) then
 
-    O_PMODAMP2_AIN <= pwm_accumulator(17);
+      if clock_div = "0000" then
+        pwm_accumulator  <=  ('0'&pwm_accumulator(16 downto 0)) + ('0'&audio&'0');
+      end if;
+
+    end if;
+  end process;
+
+  O_PMODAMP2_AIN   <= pwm_accumulator(17);
+  O_PMODAMP2_SHUTD <= not sw(15); -- sw15 up = amp shut down (audio disabled)
+  O_PMODAMP2_GAIN  <= not sw(14); -- sw14 up = gain active (GAIN active low)
 
 end struct;
